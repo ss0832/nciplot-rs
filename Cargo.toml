@@ -1,0 +1,33 @@
+[package]
+name = "nciplot-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["ss0832 <highlighty876@gmail.com>"]
+license = "Apache-2.0"
+description = "Real-space NCI, IGM, and IGMH analysis and offline molecular visualization"
+readme = "README.md"
+documentation = "https://docs.rs/nciplot-rs"
+keywords = ["chemistry", "nci", "igmh", "visualization"]
+categories = ["science", "visualization", "command-line-utilities"]
+include = ["/src/**", "/tests/**", "/python/nciplot_rs/*.py", "/python/tests/*.py", "/tools/*.py", "/pyproject.toml", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/NOTICE"]
+autobins = false
+default-run = "nciplot-rs"
+
+[lib]
+name = "nciplot_rs"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "nciplot-rs"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+pyo3 = { version = "0.23", optional = true, features = ["extension-module", "abi3-py39"] }
+
+[features]
+python = ["dep:pyo3"]

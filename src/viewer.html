@@ -1,0 +1,425 @@
+<!doctype html>
+<!-- Adapted from dft-rs. Copyright (c) 2026 ss0832. SPDX-License-Identifier: Apache-2.0. -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nciplot-rs · Molecular interaction view</title>
+<style>
+:root {color-scheme:light dark;--page:#f1f3f7;--surface:#fff;--ink:#1e2937;--muted:#59697b;--line:#d9e0e9;--scene:#f8faff;--grid:#dce5ef}
+@media(prefers-color-scheme:dark){:root{--page:#10151d;--surface:#171f2a;--ink:#e3ecf5;--muted:#b0bed0;--line:#303c4d;--scene:#121a25;--grid:#313d50}}
+[hidden]{display:none!important}*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:15px/1.45 Inter,system-ui,sans-serif}
+main{max-width:1420px;margin:auto;padding:clamp(16px,4vw,48px)}header{display:flex;align-items:end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:22px}
+h1,h2,p{margin:0}h1{font-size:clamp(25px,4vw,38px);font-weight:650;letter-spacing:-.025em}h2{font-size:17px;font-weight:600}
+.meta,.hint{color:var(--muted);font-size:13px}.layout{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:16px}
+section{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.panel-head{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:15px 16px}
+canvas{width:100%;height:clamp(310px,41vw,510px);display:block;background:var(--scene)}#scene{touch-action:none;cursor:grab}#scene:active{cursor:grabbing}
+.controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 16px;border-top:1px solid var(--line)}
+button,select,input[type=number]{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 9px}
+label{display:inline-flex;align-items:center;gap:8px}input[type=range]{width:100px}input[type=number]{width:8em}label[hidden]{display:none}
+.legend{padding:14px 16px;border-top:1px solid var(--line)}.ramp{height:7px;border-radius:5px;background:linear-gradient(90deg,#3059b3,#579d65,#c34d42);margin:5px 0}
+.legend-values{display:flex;justify-content:space-between;color:var(--muted);font-size:12px}
+@media(max-width:920px){.layout{grid-template-columns:1fr}}
+</style>
+<main>
+<header><h1>Molecular interaction view</h1><p id="iso-label" class="meta"></p></header>
+<div class="layout">
+<section aria-labelledby="scene-heading">
+  <div class="panel-head"><h2 id="scene-heading">Molecule and isosurface</h2><button type="button" id="reset">Reset view</button></div>
+  <canvas id="scene" tabindex="0" aria-label="Rotatable molecular geometry and signed-density-coloured isosurface"></canvas>
+  <div class="controls"><label>Surface opacity <input id="opacity" type="range" min="0" max="1" step=".05" value=".70"></label><span class="hint">Drag to rotate · scroll to zoom · arrow keys to rotate</span></div>
+  <div class="controls" role="group" aria-label="Surface density in electrons per cubic Bohr">
+    <label>Clip by <select id="density-field"><option value="rho">Density ρ</option><option value="signed">Signed density sign(λ₂)ρ</option></select></label>
+    <label>Minimum <input id="density-min" type="number" step="any" placeholder="Unbounded"></label>
+    <label>Maximum <input id="density-max" type="number" step="any" placeholder="Unbounded"></label>
+    <p class="hint" id="surface-info" aria-live="polite"></p>
+  </div>
+  <div class="legend">
+    <span class="meta">Surface colour · sign(λ₂)ρ (e/Bohr³)</span>
+    <div class="controls"><label>Colour minimum <input id="color-min" type="number" step="any"></label>
+    <label>Colour maximum <input id="color-max" type="number" step="any"></label>
+    <p class="hint" id="color-info" aria-live="polite"></p></div>
+    <div class="ramp" id="ramp"></div>
+    <div class="legend-values"><span id="negative"></span><span id="positive"></span></div>
+  </div>
+</section>
+<section aria-labelledby="plot-heading">
+  <div class="panel-head"><h2 id="plot-heading">Interaction scatter</h2><label>Vertical axis <select id="plot-mode"><option value="igmh">IGMH Δg</option><option value="nci">NCI reduced gradient</option></select></label><label id="nci-range-control" hidden>Gradient range <select id="nci-range"><option value="full">Full range</option><option id="nci-detail" value="detail"></option></select></label></div>
+  <canvas id="scatter" role="img" aria-label="Scatter of signed electron density and interaction gradient"></canvas>
+  <div class="legend"><p class="hint" id="plot-info"></p></div>
+</section>
+</div>
+<noscript>Enable JavaScript to rotate the molecular scene and switch the scatter plot.</noscript>
+</main>
+<script id="igmh-data" type="application/json">__NCIPLOT_DATA__</script>
+<script>
+"use strict";
+const data = JSON.parse(document.getElementById("igmh-data").textContent);
+const scene = document.getElementById("scene");
+const scatter = document.getElementById("scatter");
+const opacity = document.getElementById("opacity");
+const mode = document.getElementById("plot-mode");
+const nciRange = document.getElementById("nci-range");
+const densityField = document.getElementById("density-field");
+const densityMin = document.getElementById("density-min");
+const densityMax = document.getElementById("density-max");
+const colorMin = document.getElementById("color-min");
+const colorMax = document.getElementById("color-max");
+const surfaceInfo = document.getElementById("surface-info");
+const colorTheme = matchMedia("(prefers-color-scheme: dark)");
+const names = {total: "Total", inter: "Interfragment", intra: "Intrafragment"};
+document.getElementById("iso-label").textContent = data.field === "rdg" ? "RDG = " + data.isovalue : names[data.field] + " Δg = " + data.isovalue + " e/Bohr⁴";
+document.getElementById("nci-detail").textContent = "Detail (s ≤ " + data.nciDetailLimit + ")";
+nciRange.value = "full";
+mode.options[0].text = data.method.toUpperCase() + " Δg";
+mode.options[0].disabled = !data.hasDelta;
+if (data.field === "rdg") mode.value = "nci";
+densityField.value = data.signedSurfaceDensity ? "signed" : "rho";
+let activeDensityField = densityField.value;
+const clips = {rho: [0, data.field === "rdg" ? .08 : ""], signed: ["", ""]};
+clips[activeDensityField] = [data.surfaceDensityMin ?? "", data.surfaceDensityMax ?? ""];
+[densityMin.value, densityMax.value] = clips[activeDensityField];
+colorMin.value = data.colorMin;
+colorMax.value = data.colorMax;
+let colorBounds = [data.colorMin, data.colorMax];
+
+function unpack(base64, Type) {
+    let bytes;
+    if (Uint8Array.fromBase64) {
+        bytes = Uint8Array.fromBase64(base64);
+    } else {
+        const decoded = atob(base64);
+        bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < bytes.length; i++) bytes[i] = decoded.charCodeAt(i);
+    }
+    if (new Uint8Array(new Uint16Array([1]).buffer)[0] === 0) {
+        for (let i = 0; i < bytes.length; i += Type.BYTES_PER_ELEMENT) bytes.subarray(i, i + Type.BYTES_PER_ELEMENT).reverse();
+    }
+    return new Type(bytes.buffer);
+}
+const vertices = unpack(data.vertices, Float32Array);
+const faces = unpack(data.faces, Uint32Array);
+const samples = unpack(data.scatter, Float64Array);
+// Release encoded copies after decoding the indexed geometry and samples.
+document.getElementById("igmh-data").remove();
+delete data.vertices;
+delete data.faces;
+delete data.scatter;
+
+function canvasContext(canvas) {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const width = Math.round(rect.width * dpr), height = Math.round(rect.height * dpr);
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    return [ctx, rect.width, rect.height];
+}
+
+function theme(key) {
+    return getComputedStyle(document.documentElement).getPropertyValue(key).trim();
+}
+
+function fieldColor(value, minimum, maximum, lighten = 1) {
+    const blue = [48, 89, 179], green = [87, 157, 101], red = [195, 77, 66];
+    const center = Math.max(minimum, Math.min(0, maximum));
+    const v = Math.max(minimum, Math.min(value, maximum));
+    const [left, right, weight] = v < center ? [blue, green, (v - minimum) / (center - minimum)] :
+        (v > center ? [green, red, (v - center) / (maximum - center)] : [green, green, 0]);
+    return "rgb(" + left.map((x, i) => Math.round((x + weight * (right[i] - x)) * lighten)).join(",") + ")";
+}
+
+const atomColor = {1: "#dde4ec", 5: "#dc996a", 6: "#667384", 7: "#426fbf", 8: "#d95751",
+    9: "#89b66c", 14: "#bfac8c", 15: "#db9e48", 16: "#dab844", 17: "#66a875"};
+const low = [Infinity, Infinity, Infinity], high = [-Infinity, -Infinity, -Infinity];
+function includeInBounds(x, y, z) {
+    low[0] = Math.min(low[0], x); high[0] = Math.max(high[0], x);
+    low[1] = Math.min(low[1], y); high[1] = Math.max(high[1], y);
+    low[2] = Math.min(low[2], z); high[2] = Math.max(high[2], z);
+}
+for (const [, x, y, z] of data.atoms) includeInBounds(x, y, z);
+for (let i = 0; i < vertices.length; i += 5) {
+    includeInBounds(vertices[i], vertices[i + 1], vertices[i + 2]);
+}
+const center = low.map((x, axis) => (x + high[axis]) * 0.5);
+const radius = Math.max(1, ...high.map((x, axis) => (x - low[axis]) * 0.5));
+let yaw = -.35, pitch = .24, zoom = 1, drag = null, queued = false;
+let mesh = vertices, surface = [];
+
+function clipDensity(polygon, threshold, direction, field) {
+    // Each face carries a linear density field. Interpolate at the cut edges.
+    const result = [];
+    let previous = polygon.at(-1);
+    for (const current of polygon) {
+        const inside = direction * (current[field] - threshold) >= 0;
+        const wasInside = direction * (previous[field] - threshold) >= 0;
+        if (inside !== wasInside) {
+            const t = (threshold - previous[field]) / (current[field] - previous[field]);
+            if (t > 0 && t < 1) {
+                const point = [0, 1, 2, 3, 4].map(i => previous[i] + t * (current[i] - previous[i]));
+                point[field] = threshold;
+                result.push(point);
+            }
+        }
+        if (inside) result.push(current);
+        previous = current;
+    }
+    return result;
+}
+
+function updateSurface() {
+    const signed = densityField.value === "signed";
+    const field = signed ? 3 : 4;
+    const minimum = densityMin.value === "" ? (signed ? -Infinity : 0) : densityMin.valueAsNumber;
+    const maximum = densityMax.value === "" ? Infinity : densityMax.valueAsNumber;
+    if (densityMin.validity.badInput || densityMax.validity.badInput || !(minimum < maximum) || (!signed && minimum < 0)) {
+        surfaceInfo.textContent = signed ? "Enter bounds with minimum < maximum." :
+            "Enter bounds with 0 ≤ minimum < maximum.";
+        return;
+    }
+    mesh = vertices;
+    surface = [];
+    const extra = [];
+    for (let i = 0; i < faces.length; i += 3) {
+        const a = faces[i] * 5, b = faces[i+1] * 5, c = faces[i+2] * 5;
+        const lo = Math.min(vertices[a+field], vertices[b+field], vertices[c+field]);
+        const hi = Math.max(vertices[a+field], vertices[b+field], vertices[c+field]);
+        if (hi < minimum || lo > maximum) continue;
+        let indices = [faces[i], faces[i+1], faces[i+2]];
+        let color = (vertices[a+3] + vertices[b+3] + vertices[c+3]) / 3;
+        if (lo < minimum || hi > maximum) {
+            let polygon = [a, b, c].map(index => vertices.subarray(index, index + 5));
+            if (lo < minimum) polygon = clipDensity(polygon, minimum, 1, field);
+            if (hi > maximum) polygon = clipDensity(polygon, maximum, -1, field);
+            if (polygon.length < 3) continue;
+            indices = [];
+            color = 0;
+            for (const point of polygon) {
+                indices.push((vertices.length + extra.length) / 5);
+                extra.push(...point);
+                color += point[3] / polygon.length;
+            }
+        }
+        surface.push([indices, color, fieldColor(color, ...colorBounds), fieldColor(color, ...colorBounds, .91)]);
+    }
+    if (extra.length) {
+        mesh = new Float32Array(vertices.length + extra.length);
+        mesh.set(vertices); mesh.set(extra, vertices.length);
+    }
+    surfaceInfo.textContent = surface.length.toLocaleString() + " / " + (faces.length / 3).toLocaleString() +
+        " faces intersect the selected range · e/Bohr³";
+    requestScene();
+}
+
+function updateColors() {
+    const minimum = colorMin.valueAsNumber, maximum = colorMax.valueAsNumber;
+    const info = document.getElementById("color-info");
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || !(minimum < maximum)) {
+        info.textContent = "Enter finite endpoints with minimum < maximum.";
+        return;
+    }
+    info.textContent = "";
+    colorBounds = [minimum, maximum];
+    document.getElementById("negative").textContent = minimum;
+    document.getElementById("positive").textContent = maximum;
+    const center = Math.max(minimum, Math.min(0, maximum));
+    const scale = Math.max(Math.abs(minimum), Math.abs(maximum));
+    const middle = 100 * ((center / scale - minimum / scale) / (maximum / scale - minimum / scale));
+    const stops = [fieldColor(minimum, ...colorBounds), fieldColor(maximum, ...colorBounds)];
+    if (minimum < 0 && maximum > 0) stops.splice(1, 0, fieldColor(0, ...colorBounds) + " " + middle + "%");
+    document.getElementById("ramp").style.background = "linear-gradient(90deg," + stops.join(",") + ")";
+    for (const face of surface) {
+        face[2] = fieldColor(face[1], ...colorBounds);
+        face[3] = fieldColor(face[1], ...colorBounds, .91);
+    }
+    requestScene();
+}
+
+function drawScene() {
+    queued = false;
+    const [ctx, width, height] = canvasContext(scene);
+    const scale = Math.min(width, height) * .34 / radius * zoom;
+    const cx = Math.cos(pitch), sx = Math.sin(pitch), cy = Math.cos(yaw), sy = Math.sin(yaw);
+    const project = (x, y, z) => {
+        x -= center[0]; y -= center[1]; z -= center[2];
+        const u = cy * x + sy * z, w = -sy * x + cy * z;
+        return [width / 2 + scale * u, height / 2 - scale * (cx * y - sx * w), sx * y + cx * w];
+    };
+    const atoms = data.atoms.map(([, x, y, z]) => project(x, y, z));
+    const layers = [], projected = [];
+    if (+opacity.value > 0) {
+        for (const [indices, , front, back] of surface) {
+            let depth = 0;
+            for (const i of indices) {
+                projected[i] ??= project(mesh[5*i], mesh[5*i+1], mesh[5*i+2]);
+                depth += projected[i][2];
+            }
+            layers.push([depth / indices.length, 0, indices, front, back]);
+        }
+    }
+    for (const [i, j] of data.bonds) {
+        // Short segments let atoms and surfaces occlude a bond along its depth.
+        const a = atoms[i], b = atoms[j];
+        const at = t => a.map((value, axis) => value + t * (b[axis] - value));
+        for (let part = 0; part < 5; part++) {
+            const p = at(part / 5), q = at((part + 1) / 5);
+            layers.push([(p[2] + q[2]) * .5, 1, [p, q]]);
+        }
+    }
+    atoms.forEach((atom, index) => layers.push([atom[2], 2, atom, index]));
+    layers.sort((a, b) => a[0] - b[0]);
+
+    for (const [, type, geometry, value, back] of layers) {
+        ctx.beginPath();
+        if (type === 0) {
+            const [i, j, k] = geometry;
+            const a = projected[i], b = projected[j], c = projected[k];
+            const normal = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            ctx.globalAlpha = +opacity.value;
+            ctx.fillStyle = normal >= 0 ? value : back;
+            ctx.moveTo(a[0], a[1]);
+            for (let n = 1; n < geometry.length; n++) {
+                const [x, y] = projected[geometry[n]];
+                ctx.lineTo(x, y);
+            }
+            ctx.closePath(); ctx.fill();
+            ctx.globalAlpha = 1;
+        } else if (type === 1) {
+            const [a, b] = geometry;
+            ctx.lineWidth = Math.max(2, scale * .13);
+            ctx.strokeStyle = "#8495a9"; ctx.lineCap = "round";
+            ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+        } else {
+            const [x, y] = geometry;
+            const atom = data.atoms[value], z = atom[0];
+            const r = Math.max(4, scale * (z === 1 ? .19 : .30));
+            const shadow = ctx.createRadialGradient(x-r*.32, y-r*.38, r*.08, x, y, r);
+            shadow.addColorStop(0, "#ffffff"); shadow.addColorStop(.42, atomColor[z] || "#9a8caf");
+            shadow.addColorStop(1, "#465366");
+            ctx.arc(x, y, r, 0, 2 * Math.PI);
+            ctx.fillStyle = shadow; ctx.fill();
+            if (r >= 9 && atom[4]) {
+                ctx.fillStyle = z === 1 ? "#233140" : "#fff";
+                ctx.font = "600 " + Math.min(15, r) + "px system-ui";
+                ctx.textAlign = "center"; ctx.textBaseline = "middle";
+                ctx.fillText(atom[4], x, y);
+            }
+        }
+    }
+}
+
+function requestScene() {
+    if (!queued) { queued = true; requestAnimationFrame(drawScene); }
+}
+function changeZoom(factor) {
+    zoom = Math.max(.35, Math.min(4.5, zoom * factor));
+    requestScene();
+}
+scene.addEventListener("pointerdown", e => {
+    if (drag !== null || e.button !== 0) return;
+    drag = [e.pointerId, e.clientX, e.clientY];
+    scene.setPointerCapture(e.pointerId);
+});
+scene.addEventListener("pointermove", e => {
+    if (!drag || drag[0] !== e.pointerId) return;
+    yaw += .010 * (e.clientX - drag[1]); pitch += .010 * (e.clientY - drag[2]);
+    drag = [e.pointerId, e.clientX, e.clientY];
+    requestScene();
+});
+scene.addEventListener("lostpointercapture", () => { drag = null; });
+scene.addEventListener("wheel", e => {
+    e.preventDefault();
+    changeZoom(Math.exp(-.0018 * e.deltaY));
+}, {passive: false});
+scene.addEventListener("keydown", e => {
+    const turns = {ArrowLeft: [-1,0], ArrowRight: [1,0], ArrowUp: [0,-1], ArrowDown: [0,1]};
+    if (turns[e.key]) {
+        yaw += .13 * turns[e.key][0]; pitch += .13 * turns[e.key][1]; requestScene();
+    } else if (e.key === "+" || e.key === "-") {
+        changeZoom(e.key === "+" ? 1.12 : 1 / 1.12);
+    } else { return; }
+    e.preventDefault();
+});
+document.getElementById("reset").addEventListener("click", () => {
+    yaw = -.35; pitch = .24; zoom = 1; requestScene();
+});
+opacity.addEventListener("input", requestScene);
+densityField.addEventListener("change", () => {
+    clips[activeDensityField] = [densityMin.value, densityMax.value];
+    activeDensityField = densityField.value;
+    [densityMin.value, densityMax.value] = clips[activeDensityField];
+    updateSurface();
+});
+densityMin.addEventListener("change", updateSurface);
+densityMax.addEventListener("change", updateSurface);
+colorMin.addEventListener("change", updateColors);
+colorMax.addEventListener("change", updateColors);
+
+let nciMax = 0;
+const scatterColors = new Array(samples.length / 3);
+for (let i = 0; i < samples.length; i += 3) {
+    if (Number.isFinite(samples[i + 2])) nciMax = Math.max(nciMax, samples[i + 2]);
+    scatterColors[i / 3] = fieldColor(samples[i], -.04, .04);
+}
+
+function drawScatter() {
+    const [ctx, width, height] = canvasContext(scatter);
+    const nci = mode.value === "nci";
+    const detail = nciRange.value === "detail";
+    const yLimit = nci ? (detail ? data.nciDetailLimit : (Math.min(nciMax * 1.06, Number.MAX_VALUE) || 1)) : data.igmhLimit;
+    const xLimit = data.scatterDensityLimit;
+    document.getElementById("nci-range-control").hidden = !nci;
+    const left = width < 400 ? 53 : 63, right = width - 17, top = 17, bottom = height - 54;
+    const x = density => left + (density / xLimit + 1) * .5 * (right - left);
+    const y = ordinate => bottom - ordinate / yLimit * (bottom - top);
+    ctx.font = "12px system-ui";
+    ctx.strokeStyle = theme("--grid"); ctx.fillStyle = theme("--muted");
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (let i = -2; i <= 2; i++) {
+        const density = i * xLimit / 2, px = x(density);
+        ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
+        ctx.fillText(i === 0 ? "0" : Number(density.toPrecision(3)), px, bottom + 8);
+    }
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (let i = 0; i <= 4; i++) {
+        const ordinate = yLimit * (i / 4), py = y(ordinate);
+        ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke();
+        ctx.fillText(Number(ordinate.toPrecision(3)), left - 6, py);
+    }
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left - 1, top - 1, right - left + 2, bottom - top + 2); ctx.clip();
+    ctx.globalAlpha = .29;
+    let shown = 0;
+    for (let i = 0; i < samples.length; i += 3) {
+        const density = samples[i], ordinate = samples[i + (nci ? 2 : 1)];
+        if (ordinate <= yLimit) {
+            ctx.fillStyle = scatterColors[i / 3];
+            ctx.fillRect(x(density) - .8, y(ordinate) - .8, 1.6, 1.6);
+            shown++;
+        }
+    }
+    ctx.restore();
+    ctx.strokeStyle = theme("--muted"); ctx.beginPath();
+    ctx.moveTo(left, top); ctx.lineTo(left, bottom); ctx.lineTo(right, bottom); ctx.stroke();
+    ctx.fillStyle = theme("--ink"); ctx.font = "13px system-ui"; ctx.textAlign = "center";
+    ctx.fillText("sign(λ₂)ρ (e/Bohr³)", (left + right) / 2, height - 14);
+    ctx.save(); ctx.translate(13, (top + bottom) / 2); ctx.rotate(-Math.PI / 2);
+    ctx.fillText(nci ? "Reduced density gradient s" : "Δg (e/Bohr⁴)", 0, 0); ctx.restore();
+    const format = value => Number(value.toPrecision(4)).toString();
+    document.getElementById("plot-info").textContent = shown.toLocaleString() + " / " +
+        (samples.length / 3).toLocaleString() + " samples in range" +
+        (nci && samples.length ? " · maximum s = " + format(nciMax) : "") +
+        " · blue negative / green near zero / red positive";
+    scatter.setAttribute("aria-label", nci ?
+        "Reduced density gradient versus signed electron density" : "Gradient difference versus signed electron density");
+}
+mode.addEventListener("change", drawScatter);
+nciRange.addEventListener("change", drawScatter);
+const observer = new ResizeObserver(() => { requestScene(); drawScatter(); });
+observer.observe(scene); observer.observe(scatter);
+colorTheme.addEventListener("change", () => { requestScene(); drawScatter(); });
+updateColors(); updateSurface(); drawScatter();
+</script>
+</html>
